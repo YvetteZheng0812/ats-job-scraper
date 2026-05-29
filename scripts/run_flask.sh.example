@@ -1,0 +1,23 @@
+#!/bin/zsh
+# Keep apply_assistant Flask server running so notifications/clicks land on
+# http://localhost:8765/. Triggered by
+# ~/Library/LaunchAgents/<your-bundle-id>.ats-scraper.serve.plist (RunAtLoad + KeepAlive).
+#
+# SETUP: copy this to scripts/run_flask.sh, then replace <PROJECT_DIR> with the
+# absolute path to your project root (no trailing slash). chmod +x afterwards.
+
+set -u
+
+# launchd's default PATH lacks Homebrew.
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+PROJECT_DIR="<PROJECT_DIR>"
+cd "$PROJECT_DIR"
+
+# Non-fatal source of interactive zshrc — picks up any user env (rarely needed for Flask itself)
+[ -f "$HOME/.zshrc" ] && source "$HOME/.zshrc" 2>/dev/null
+
+# Use Homebrew's python3 explicitly — /opt/homebrew/bin/python3 doesn't exist (only python3.10),
+# so a bare `python3` would fall back to Apple's /usr/bin/python3 which lacks Flask.
+# exec so launchd's process supervision tracks Flask itself, not the wrapper shell.
+exec /opt/homebrew/bin/python3.10 apply_assistant.py --serve --port 8765 --no-browser

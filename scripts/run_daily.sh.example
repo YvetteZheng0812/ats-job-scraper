@@ -1,0 +1,57 @@
+#!/bin/zsh
+# Daily ATS scrape; on Mondays also refresh slugs via SerpAPI.
+# Triggered by ~/Library/LaunchAgents/<your-bundle-id>.ats-scraper.daily.plist at 08:00.
+#
+# SETUP: copy this to scripts/run_daily.sh, then replace <PROJECT_DIR> with the
+# absolute path to your project root (no trailing slash). chmod +x afterwards.
+
+set -u
+
+# (1) Force a sane PATH — launchd's default is too narrow to find Homebrew tools.
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+PROJECT_DIR="<PROJECT_DIR>"
+LOG="$PROJECT_DIR/launchd.log"
+URL="http://localhost:8765/"   # (3) Click target — Flask server, NOT file://
+
+cd "$PROJECT_DIR"
+
+# Inherit SERPAPI_KEY etc. from the user's shell env. Non-fatal if any
+# interactive-only line in zshrc complains in a non-tty shell.
+[ -f "$HOME/.zshrc" ] && source "$HOME/.zshrc" 2>/dev/null
+
+echo "" >> "$LOG"
+echo "===== $(date '+%Y-%m-%d %H:%M:%S') =====" >> "$LOG"
+
+# Day-of-week (1 = Monday). Monday → full discovery; otherwise --no-search.
+# Explicit /opt/homebrew/bin/python3.10 because `python3` would fall back to Apple's
+# /usr/bin/python3 (no Homebrew python3 symlink — only python3.10 exists).
+#
+# `caffeinate -i` keeps the Mac awake for the lifetime of the wrapped command,
+# then releases the assertion when the scraper exits. Prevents idle-sleep from
+# pausing a 10–30min Monday discovery run mid-flight.
+PY="/opt/homebrew/bin/python3.10"
+if [ "$(date +%u)" = "1" ]; then
+    echo "Mode: weekly (discovery + scrape, caffeinated)" >> "$LOG"
+    /usr/bin/caffeinate -i "$PY" ats_scraper.py --max-age-days 2 >> "$LOG" 2>&1
+else
+    echo "Mode: daily (--no-search, caffeinated)" >> "$LOG"
+    /usr/bin/caffeinate -i "$PY" ats_scraper.py --no-search --max-age-days 2 >> "$LOG" 2>&1
+fi
+
+# (2) Match count — count CSV ROWS (not physical lines). description_snippet may
+# contain embedded newlines inside quoted fields, which `wc -l` would over-count.
+N=0
+if [ -f "$PROJECT_DIR/jobs_results.csv" ]; then
+    N=$(/opt/homebrew/bin/python3.10 -c "import csv,sys; print(sum(1 for _ in csv.DictReader(open(sys.argv[1], encoding='utf-8'))))" "$PROJECT_DIR/jobs_results.csv" 2>/dev/null)
+    [ -z "$N" ] && N=0
+fi
+
+if [ "$N" -gt 0 ]; then
+    terminal-notifier \
+        -title "Job Scraper" \
+        -subtitle "$(date '+%a %b %d')" \
+        -message "Found $N matches — click to review" \
+        -open "$URL" \
+        -sound default >> "$LOG" 2>&1
+fi

@@ -1,0 +1,78 @@
+{
+  "//": "Generic template — copy to config.json and fill in. Keys starting with // are ignored by the loader and exist purely as inline docs.",
+
+  "profile": {
+    "//": "Personal identity — populates apply_assistant.html's copy-to-clipboard panel.",
+    "full_name":   "<Your Full Name>",
+    "email":       "<you@example.com>",
+    "phone":       "<+country-code area-number>",
+    "linkedin":    "<https://www.linkedin.com/in/handle>  (leave \"\" if N/A)",
+    "github":      "<https://github.com/handle>  (leave \"\" if N/A)",
+    "location":    "<City, Region>",
+    "visa_status": "<e.g. Citizen | Permanent Resident | Work Visa Required>",
+    "resume_path": "<~/path/to/resume.pdf>"
+  },
+
+  "scraper": {
+    "//search_locations":
+      "Cities or regions to inject into Google search queries. Add 'Remote' if applicable.",
+    "search_locations": ["<City 1>", "<City 2>", "Remote"],
+
+    "//target_titles":
+      "Job-title keywords (lowercase, substring match) → score weight. Higher = more relevant to you.",
+    "target_titles": {
+      "<primary role keyword>":   50,
+      "<secondary role keyword>": 40
+    },
+
+    "//strict_filter_titles":
+      "Titles in this list get EXTRA gates from `strict_rules` (e.g. required keywords in desc + YoE cap). Leave empty to disable strict filtering.",
+    "strict_filter_titles": [],
+
+    "//exclude_companies":
+      "Hard reject these companies (case-insensitive substring match against company name).",
+    "exclude_companies": [],
+
+    "//exclude_title_words":
+      "Hard reject any title containing these substrings (intern, junior, director, …).",
+    "exclude_title_words": ["intern", "internship"],
+
+    "//exclude_desc_keywords":
+      "Hard reject if posting description contains any of these. E.g. ['clearance'] for non-citizens.",
+    "exclude_desc_keywords": [],
+
+    "//tech_keywords":
+      "Skills / tools that boost relevance (+3 each, capped at +25). For non-tech roles use whatever industry-specific keywords apply (e.g. 'figma', 'a/b testing', 'crm').",
+    "tech_keywords": [],
+
+    "//min_score":
+      "Minimum relevance score (0-100) to include a job in results. Lower to see more, raise to be picky.",
+    "min_score": 35,
+
+    "//max_posting_age_days":
+      "Drop jobs older than this many days where the ATS exposes a posting date.",
+    "max_posting_age_days": 14,
+
+    "//query_templates":
+      "Google search templates used during slug discovery. {site} = ATS host, {location} = each search_location.",
+    "query_templates": [
+      "site:{site} \"<role keyword>\" \"{location}\""
+    ],
+
+    "//locations":
+      "Geographic scoring. preferred_area = top priority (kw → +pts), allowed = secondary, exclude_regions = reject if posting location contains any of these substrings, exclude_remote_regions = reject 'remote' postings whose location says one of these.",
+    "locations": {
+      "preferred_area":         { "<top-priority city>": 25 },
+      "allowed":                { "<acceptable city or region>": 15, "remote": 15 },
+      "exclude_regions":        [],
+      "exclude_remote_regions": []
+    },
+
+    "//strict_rules":
+      "Applied ONLY to titles in strict_filter_titles. require_keywords_in_desc: ALL must appear; max_years_experience: drop if posting says '>N years'. Set max_years_experience to 0 to disable.",
+    "strict_rules": {
+      "require_keywords_in_desc": [],
+      "max_years_experience":     0
+    }
+  }
+}

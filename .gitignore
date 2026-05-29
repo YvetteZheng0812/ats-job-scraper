@@ -1,0 +1,32 @@
+# Personal config (use config.example.json as template)
+config.json
+
+# Personal data
+JobApplicationTracker.csv
+discovered_slugs.json
+jobs_results.csv
+jobs_results.html
+apply_assistant.html
+skipped_companies.json
+
+# Logs
+*.log
+launchd.stdout.log
+launchd.stderr.log
+launchd.flask.stdout.log
+launchd.flask.stderr.log
+
+# Personal wrapper scripts (hardcoded absolute paths)
+scripts/run_daily.sh
+scripts/run_flask.sh
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
