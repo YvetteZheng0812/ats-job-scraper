@@ -980,16 +980,56 @@ def export_html(jobs: list[JobListing]):
           </td>
         </tr>"""
 
-    n_remote  = sum(1 for j in jobs if "remote" in j.location.lower())
-    n_seattle = sum(1 for j in jobs if "seattle" in j.location.lower() or "bellevue" in j.location.lower())
-    n_sf      = sum(1 for j in jobs if "san francisco" in j.location.lower() or " sf" in j.location.lower())
-    n_high    = sum(1 for j in jobs if j.relevance_score >= 70)
+    # Derive location stats / filter options from config so the report stays generic.
+    # preferred_kw = top-priority area (e.g. ["seattle","bellevue",...] or ["london"])
+    # allowed_only_kw = secondary cities that aren't already preferred and aren't "remote"
+    preferred_kw    = list(_LOC.get("preferred_area", {}).keys())
+    allowed_kw      = list(_LOC.get("allowed", {}).keys())
+    preferred_set   = set(preferred_kw)
+    allowed_only_kw = [k for k in allowed_kw if k not in preferred_set and k.strip() != "remote"]
+
+    def _matches_any(loc_str: str, kws: list[str]) -> bool:
+        return any(k in loc_str for k in kws)
+
+    def _group_label(kws: list[str]) -> str:
+        if not kws:
+            return ""
+        head = kws[0].strip().lstrip().title() or kws[0]
+        return f"{head} Area" if len(kws) > 1 else head
+
+    n_remote    = sum(1 for j in jobs if "remote" in j.location.lower())
+    n_preferred = sum(1 for j in jobs if _matches_any(j.location.lower(), preferred_kw))
+    n_allowed   = sum(1 for j in jobs if _matches_any(j.location.lower(), allowed_only_kw))
+    n_high      = sum(1 for j in jobs if j.relevance_score >= 70)
+
+    preferred_label = _group_label(preferred_kw) or "Preferred"
+    allowed_label   = _group_label(allowed_only_kw) or "Allowed"
+
+    # Optional stats blocks — only emit if the corresponding group is non-empty in config
+    stat_preferred = (f'  <div class="stat"><div class="n">{n_preferred}</div>'
+                      f'<div class="l">{preferred_label}</div></div>') if preferred_kw else ""
+    stat_allowed   = (f'  <div class="stat"><div class="n">{n_allowed}</div>'
+                      f'<div class="l">{allowed_label}</div></div>') if allowed_only_kw else ""
+
+    # Build the location filter dropdown's options from config
+    loc_filter_options = ""
+    seen_opts: set[str] = set()
+    for value, label in [
+        (preferred_kw[0]    if preferred_kw    else None, preferred_label),
+        (allowed_only_kw[0] if allowed_only_kw else None, allowed_label),
+        ("remote", "Remote"),
+    ]:
+        if not value: continue
+        v = value.strip().lower()
+        if v in seen_opts: continue
+        seen_opts.add(v)
+        loc_filter_options += f'    <option value="{v}">{label}</option>\n'
 
     html = f"""<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Data Engineer Jobs — {datetime.now().strftime('%b %d, %Y')}</title>
+<title>Job Results — {datetime.now().strftime('%b %d, %Y')}</title>
 <style>
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
   body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -1028,8 +1068,8 @@ def export_html(jobs: list[JobListing]):
 </head><body>
 
 <div class="hero">
-  <h1>🔍 Data Engineer Job Results</h1>
-  <p>Scraped via SerpAPI Google search → Ashby · Greenhouse · Lever APIs &nbsp;|&nbsp; {datetime.now().strftime('%B %d, %Y')}</p>
+  <h1>🔍 Job Results</h1>
+  <p>Scraped via SerpAPI + direct ATS APIs &nbsp;|&nbsp; {datetime.now().strftime('%B %d, %Y')}</p>
 </div>
 
 <div class="stats">
@@ -1037,18 +1077,15 @@ def export_html(jobs: list[JobListing]):
   <div class="stat"><div class="n">{n_high}</div><div class="l">High Relevance (70+)</div></div>
   <div class="stat"><div class="n">{len(set(j.company for j in jobs))}</div><div class="l">Companies</div></div>
   <div class="stat"><div class="n">{n_remote}</div><div class="l">Remote</div></div>
-  <div class="stat"><div class="n">{n_seattle}</div><div class="l">Seattle</div></div>
-  <div class="stat"><div class="n">{n_sf}</div><div class="l">San Francisco</div></div>
+{stat_preferred}
+{stat_allowed}
 </div>
 
 <div class="filter-bar">
   <input type="text" id="search" placeholder="Filter by company, title, tech…" oninput="filterTable()">
   <select id="locFilter" onchange="filterTable()">
     <option value="">All locations</option>
-    <option value="seattle">Seattle</option>
-    <option value="remote">Remote</option>
-    <option value="san francisco">San Francisco</option>
-  </select>
+{loc_filter_options}  </select>
   <select id="atsFilter" onchange="filterTable()">
     <option value="">All ATS</option>
     <option value="ashby">Ashby</option>
