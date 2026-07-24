@@ -40,7 +40,7 @@ import argparse
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs, unquote
 from bs4 import BeautifulSoup
 from dataclasses import dataclass, asdict, field
 from typing import Optional
@@ -255,6 +255,20 @@ def get(url: str, params: dict = None, headers: dict = None) -> Optional[request
 # RELEVANCE SCORING
 # ──────────────────────────────────────────────────────────
 
+# Bare nationwide-US location strings (lowercased) — a posting with no specific city.
+# Anything with a real city (e.g. "New York, ..., United States") is NOT in here.
+_US_NATIONWIDE = {
+    "united states", "united states of america", "usa", "u.s.a.", "us", "u.s.",
+    "nationwide", "anywhere", "anywhere in the us", "anywhere in the united states",
+    "remote us", "us remote", "united states - remote", "remote - united states",
+}
+
+def _is_us_nationwide(l: str) -> bool:
+    """True if the location denotes the whole US with no specific city."""
+    s = l.strip().strip(",").strip().strip("()").strip()
+    return s in _US_NATIONWIDE
+
+
 def score_job(title: str, location: str, description: str = "") -> tuple[int, str]:
     """
     Returns (score, matched_tech_keywords).
@@ -295,30 +309,26 @@ def score_job(title: str, location: str, description: str = "") -> tuple[int, st
     if any(x in l for x in _LOC.get("exclude_regions", [])):
         return 0, ""
 
-    preferred_area    = _LOC.get("preferred_area", {})
     allowed_locations = _LOC.get("allowed", {})
 
-    # Strict-filter titles are limited to the preferred_area; other titles can use the broader allowed set
-    if is_strict_title:
-        loc_score = 0
-        for loc_kw, pts in preferred_area.items():
-            if loc_kw in l:
-                loc_score = pts
-                break
-        if loc_score == 0:
+    # All titles (including strict-filter ones) may match the broader allowed set —
+    # strict titles are still gated by strict_rules below, just not by location.
+    loc_score = 0
+    for loc_kw, pts in allowed_locations.items():
+        if loc_kw in l:
+            loc_score = pts
+            break
+    # Nationwide-US postings (bare "United States"/"USA", no specific city) count as
+    # remote-eligible. Anchored check — NOT a substring — so a specific city like
+    # "New York, New York, United States" is not treated as nationwide.
+    if loc_score == 0 and _is_us_nationwide(l):
+        loc_score = allowed_locations.get("remote", 15)
+    if loc_score == 0:
+        return 0, ""
+    # If the matching location keyword was 'remote', verify it isn't a remote we want to exclude
+    if "remote" in l:
+        if any(x in l for x in _LOC.get("exclude_remote_regions", [])):
             return 0, ""
-    else:
-        loc_score = 0
-        for loc_kw, pts in allowed_locations.items():
-            if loc_kw in l:
-                loc_score = pts
-                break
-        if loc_score == 0:
-            return 0, ""
-        # If the matching location keyword was 'remote', verify it isn't a remote we want to exclude
-        if "remote" in l:
-            if any(x in l for x in _LOC.get("exclude_remote_regions", [])):
-                return 0, ""
     score += loc_score
 
     # Description-keyword hard excludes
@@ -329,8 +339,11 @@ def score_job(title: str, location: str, description: str = "") -> tuple[int, st
     matched_tech = [kw for kw in TECH_KEYWORDS if kw in d]
     score += min(len(matched_tech) * 3, 25)
 
-    # strict_rules apply only to strict_filter_titles
-    if is_strict_title:
+    # strict_rules apply only to strict_filter_titles. Description-based gates are
+    # skipped when d is empty — callers pass "" as a title/location pre-filter before
+    # fetching the description (SmartRecruiters/Rippling/Workday); the gate is then
+    # re-applied when the real description is scored.
+    if is_strict_title and d:
         required = _STRICT.get("require_keywords_in_desc", [])
         if required and not all(kw in d for kw in required):
             return 0, ""
@@ -412,6 +425,157 @@ def _extract_workday_slug(url: str) -> Optional[str]:
     if site.lower() in _WORKDAY_NON_SITES or "." in site or len(site) < 2:
         return None
     return f"{tenant}|{wdn}|{site}"
+
+
+# ──────────────────────────────────────────────────────────
+# URL → (ats, slug) RESOLVER
+# Handles native ATS URLs and custom-domain boards (company.com/jobs?gh_jid=…)
+# ──────────────────────────────────────────────────────────
+
+# URL query param → the ATS it identifies, used to target custom-domain resolution.
+_ATS_URL_PARAM_HINTS = {"gh_jid": "greenhouse", "ashby_jid": "ashby"}
+
+# Common company-name suffixes to also try stripping when deriving a candidate
+# slug from a custom domain (e.g. "rightwayhealthcare" → "rightway").
+_DOMAIN_SUFFIXES = ["healthcare", "health", "labs", "team", "hq", "app", "inc", "io", "ai"]
+
+# Second-level labels of multi-part TLDs (e.g. "co" in "co.uk") — skipped when
+# picking the company label so "careers.foo.co.uk" derives "foo", not "co".
+_MULTIPART_TLD_SLD = {"co", "com", "org", "net", "gov", "edu", "ac"}
+
+
+def _board_has_jobs(ats: str, slug: str, job_id: str = "") -> bool:
+    """Validate a candidate slug against the ATS API: 200 with a non-empty job list.
+    If job_id is given (e.g. a gh_jid), require the board to actually contain it so we
+    pick the right token among domain-derived candidates."""
+    if ats == "greenhouse":
+        r = get(f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs")
+        if not r:
+            return False
+        try:
+            jobs = r.json().get("jobs", [])
+        except Exception:
+            return False
+        if not jobs:
+            return False
+        if job_id:
+            ids = {str(j.get("id")) for j in jobs} | {str(j.get("internal_job_id")) for j in jobs}
+            return job_id in ids
+        return True
+    if ats == "ashby":
+        r = get(f"https://api.ashbyhq.com/posting-api/job-board/{slug}")
+        if not r:
+            return False
+        try:
+            jobs = r.json().get("jobs", [])
+            if not jobs:
+                return False
+            if job_id:
+                return any(str(j.get("id")) == job_id for j in jobs)
+            return True
+        except Exception:
+            return False
+    if ats == "lever":
+        r = get(f"https://api.lever.co/v0/postings/{slug}?mode=json")
+        if not r:
+            return False
+        try:
+            data = r.json()
+            return isinstance(data, list) and len(data) > 0
+        except Exception:
+            return False
+    return False
+
+
+def _domain_slug_candidates(url: str) -> list[str]:
+    """Derive candidate board slugs from a custom-domain URL's hostname.
+    'www.rightwayhealthcare.com' → ['rightwayhealthcare', 'rightway']."""
+    host = (urlparse(url).hostname or "").lower()
+    if not host:
+        return []
+    labels = [x for x in host.split(".") if x not in ("www", "jobs", "careers", "job", "apply")]
+    if len(labels) >= 3 and labels[-2] in _MULTIPART_TLD_SLD:
+        base = labels[-3]          # multi-part TLD, e.g. foo.co.uk → "foo"
+    elif len(labels) >= 2:
+        base = labels[-2]          # second-level domain label
+    elif labels:
+        base = labels[0]
+    else:
+        return []
+    candidates = [base]
+    for suf in _DOMAIN_SUFFIXES:
+        if base.endswith(suf) and len(base) > len(suf) + 1:
+            candidates.append(base[: -len(suf)])
+    seen: set[str] = set()
+    return [c for c in candidates if not (c in seen or seen.add(c))]
+
+
+def resolve_ats_from_url(url: str) -> Optional[tuple[str, str]]:
+    """Resolve any job URL to (ats_name, slug).
+    1. Native ATS URLs match a url_pattern directly (jobs.ashbyhq.com/teamworks → ashby).
+    2. Custom-domain boards (company.com/jobs?gh_jid=…) are resolved by deriving
+       candidate slugs from the hostname and validating them against the ATS API.
+    Returns None if it can't be resolved."""
+    # 1. Native URL → existing regex extraction (unquote to decode %20 etc. in slugs)
+    for ats_name, config in ATS_CONFIGS.items():
+        slug = _extract_workday_slug(url) if ats_name == "workday" else extract_slug(url, config["url_pattern"])
+        if slug:
+            slug = unquote(slug)
+            return ats_name, (slug.lower() if ats_name == "ashby" else slug)
+
+    # 2. Custom domain → require an ATS URL-param hint (e.g. gh_jid) to identify the
+    #    platform, then validate candidate slugs against its API.
+    #    We deliberately don't blind-probe without a hint: a domain label can collide
+    #    with an unrelated real board (e.g. "example"), producing false slugs.
+    qs = parse_qs(urlparse(url).query)
+    hinted_ats, job_id = None, ""
+    for param, ats in _ATS_URL_PARAM_HINTS.items():
+        if param in qs:
+            hinted_ats = ats
+            job_id = qs[param][0] if qs[param] else ""
+            break
+    if not hinted_ats:
+        return None
+
+    # A 'board=' param (Greenhouse board hosted on a company's own domain, e.g.
+    # coreweave.com/careers/job?board=weights_and_biases) is the authoritative token —
+    # try it before domain-derived guesses.
+    candidates = [qs["board"][0]] if qs.get("board") else []
+    candidates += _domain_slug_candidates(url)
+    seen: set[str] = set()
+    candidates = [c for c in candidates if not (c in seen or seen.add(c))]
+
+    for slug in candidates:
+        if _board_has_jobs(hinted_ats, slug, job_id):
+            return hinted_ats, (slug.lower() if hinted_ats == "ashby" else slug)
+    return None
+
+
+# Non-site-locked query that surfaces custom-domain Greenhouse boards — the gh_jid
+# param shows up in the visible job URL, so results include company career pages that
+# native site:boards.greenhouse.io discovery misses. One query per location bounds
+# SerpAPI cost. Ashby/Lever custom domains lack a reliable URL signal — use --add-url.
+EMBED_QUERY_TEMPLATE = '("data engineer" OR "analytics engineer" OR "backend engineer") gh_jid "{location}"'
+
+
+def discover_embed_slugs() -> dict[str, set[str]]:
+    """Sweep for custom-domain boards via non-site-locked search, resolving each
+    result URL to (ats, slug). Currently targets Greenhouse (gh_jid signal)."""
+    found: dict[str, set[str]] = {}
+    native_sites = [cfg["search_site"] for cfg in ATS_CONFIGS.values()]
+    for location in SEARCH_LOCATIONS:
+        query = EMBED_QUERY_TEMPLATE.format(location=location)
+        log.info(f"  [embed] Google (SerpAPI): {query}")
+        for u in serpapi_search(query):
+            if any(site in u for site in native_sites):
+                continue  # native ATS domains are handled by the normal discovery pass
+            resolved = resolve_ats_from_url(u)
+            if resolved:
+                ats, slug = resolved
+                found.setdefault(ats, set()).add(slug)
+                log.info(f"    → {ats}: {slug}  ({urlparse(u).hostname})")
+        time.sleep(SEARCH_DELAY)
+    return found
 
 
 def discover_slugs_via_serpapi(ats_name: str, config: dict) -> set[str]:
@@ -1135,7 +1299,7 @@ function filterTable() {{
 # MAIN PIPELINE
 # ──────────────────────────────────────────────────────────
 
-def run(ats_filter=None, no_search=False, export_fmt="both"):
+def run(ats_filter=None, no_search=False, export_fmt="both", discover_embeds=False):
     slugs = load_slugs()
 
     # ── Phase 1: SerpAPI discovery ───────────────────────
@@ -1168,8 +1332,19 @@ def run(ats_filter=None, no_search=False, export_fmt="both"):
             after  = len(slugs[ats_name])
             log.info(f"[{ats_name}] {before} → {after} slugs (+{after-before} new)")
 
+        if discover_embeds:
+            log.info("\n[EMBED DISCOVERY] custom-domain boards")
+            for ats_name, s in discover_embed_slugs().items():
+                if ats_filter and ats_filter != ats_name:
+                    continue
+                before = len(slugs.get(ats_name, set()))
+                slugs.setdefault(ats_name, set()).update(s)
+                log.info(f"[embed/{ats_name}] +{len(slugs[ats_name]) - before} new")
+
         save_slugs(slugs)
     else:
+        if discover_embeds:
+            log.warning("--discover-embeds needs search and is ignored with --no-search.")
         total = sum(len(v) for v in slugs.values())
         log.info(f"Skipping search. Using {total} saved slugs from {SLUGS_FILE}")
 
@@ -1285,6 +1460,13 @@ if __name__ == "__main__":
     parser.add_argument("--add-slug", nargs="+", metavar="SLUG",
                         help="Manually add slugs to an ATS. First arg = ATS name.\n"
                              "e.g.: --add-slug ashby openai anthropic scale-ai")
+    parser.add_argument("--add-url", nargs="+", metavar="URL",
+                        help="Resolve one or more job URLs to (ats, slug) and add them.\n"
+                             "Handles native ATS URLs and custom-domain boards.\n"
+                             "e.g.: --add-url https://company.com/jobs?gh_jid=123")
+    parser.add_argument("--discover-embeds", action="store_true",
+                        help="Also sweep for custom-domain Greenhouse/Ashby/Lever boards\n"
+                             "via non-site-locked search (spends extra SerpAPI searches).")
     parser.add_argument("--max-age-days", type=int, default=MAX_POSTING_AGE_DAYS,
                         help=f"Max posting age in days (default: {MAX_POSTING_AGE_DAYS}). "
                              "Use 7 for last week, 30 for last month.")
@@ -1306,4 +1488,21 @@ if __name__ == "__main__":
             print(f"Added to {ats_name}: {new}")
         exit(0)
 
-    run(ats_filter=args.ats, no_search=args.no_search, export_fmt=args.export)
+    if args.add_url:
+        slugs = load_slugs()
+        added = 0
+        for url in args.add_url:
+            resolved = resolve_ats_from_url(url)
+            if not resolved:
+                print(f"Could not resolve: {url}")
+                continue
+            ats_name, slug = resolved
+            slugs.setdefault(ats_name, set()).add(slug)
+            added += 1
+            print(f"Resolved {url}\n  → {ats_name}: {slug}")
+        if added:
+            save_slugs(slugs)
+        exit(0)
+
+    run(ats_filter=args.ats, no_search=args.no_search, export_fmt=args.export,
+        discover_embeds=args.discover_embeds)
