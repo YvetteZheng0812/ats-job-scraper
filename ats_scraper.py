@@ -427,6 +427,31 @@ def _extract_workday_slug(url: str) -> Optional[str]:
     return f"{tenant}|{wdn}|{site}"
 
 
+# Boilerplate tokens that appear in Workday *site* paths but aren't the company
+# name (e.g. "Samsung_Careers", "External_Career_Site", "Careers_GM").
+_WD_BOILERPLATE = {
+    "careers", "career", "external", "site", "jobs", "job", "portal", "global",
+    "recruiting", "talent", "opportunities", "en", "us", "enus", "search",
+}
+
+
+def _workday_company(tenant: str, site: str) -> str:
+    """
+    Best company name for a Workday posting. The *site* path (e.g. "Samsung_Careers")
+    names the employer far better than the tenant subdomain (e.g. "sec" for Samsung).
+    Split the site on separators AND camelCase, drop boilerplate tokens; fall back to
+    the tenant only when nothing meaningful remains (generic sites like "External").
+    """
+    raw = re.sub(r"[_\-]+", " ", site or "")
+    raw = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", raw)        # BlueOrigin -> Blue Origin
+    raw = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", raw)    # NVIDIAExternal -> NVIDIA External
+    tokens = [t for t in raw.split() if t and t.lower() not in _WD_BOILERPLATE]
+    if not tokens:
+        return tenant.replace("-", " ").title()
+    # Title-case, but keep short all-caps acronyms intact (GM, IBM, SAP).
+    return " ".join(w if (w.isupper() and len(w) <= 4) else w.title() for w in tokens)
+
+
 # ──────────────────────────────────────────────────────────
 # URL → (ats, slug) RESOLVER
 # Handles native ATS URLs and custom-domain boards (company.com/jobs?gh_jid=…)
@@ -644,6 +669,8 @@ def scrape_ashby(slug: str) -> list[JobListing]:
         data    = r.json()
         company = (data.get("organization") or {}).get("name") or slug.replace("-", " ").title()
         for job in data.get("jobs", []):
+            if not is_within_max_age(job.get("publishedAt", "")):
+                continue
             title    = job.get("title", "")
             location = job.get("location", "")
             job_url  = job.get("jobUrl", f"https://jobs.ashbyhq.com/{slug}/{job.get('id', '')}")
@@ -980,7 +1007,7 @@ def scrape_workday(slug: str) -> list[JobListing]:
     base = f"https://{tenant}.{wdn}.myworkdayjobs.com"
     list_url = f"{base}/wday/cxs/{tenant}/{site}/jobs"
     jobs: list[JobListing] = []
-    company_name = tenant.replace("-", " ").title()
+    company_name = _workday_company(tenant, site)
     offset = 0
     limit = 20
     total = 0  # only populated by the first response; subsequent pages report total=0
